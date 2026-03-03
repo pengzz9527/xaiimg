@@ -12,7 +12,7 @@ from PIL import Image
 
 
 APP_TITLE = "xAI 图片生成器"
-DEFAULT_MODEL = "grok-2-image"
+DEFAULT_MODEL = "grok-2-image"  # 若账号无权限，请在界面选择你可用的模型
 DEFAULT_XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai")  # 可选：区域 endpoint
 DB_PATH = os.getenv("DB_PATH", "data/app.duckdb")
 IMAGE_DIR = os.getenv("IMAGE_DIR", "generated_images")
@@ -51,6 +51,21 @@ def init_storage():
         """
     )
     con.close()
+
+
+def xai_list_models(base_url: str, api_key: str) -> list[str]:
+    base_url = base_url.strip().rstrip("/")
+    url = f"{base_url}/v1/models"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    r = requests.get(url, headers=headers, timeout=60)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    # OpenAI 兼容：data 是对象数组，id 为模型名
+    models = [m.get("id") for m in data if isinstance(m, dict) and m.get("id")]
+    return sorted(set(models))
 
 
 def xai_images_generate(base_url: str, api_key: str, model: str, prompt: str, n: int = 1, response_format: str = "b64_json"):
@@ -169,7 +184,40 @@ def main():
         )
         st.session_state["xai_base_url"] = base_url
 
-        model = st.text_input("模型", value=st.session_state.get("xai_model", DEFAULT_MODEL))
+        st.subheader("模型")
+
+        load_models = st.checkbox(
+            "自动加载可用模型列表（推荐）",
+            value=st.session_state.get("load_models", True),
+            help="会调用 /v1/models 获取你这个 Key 可用的模型，避免出现“模型不存在/无权限”的 404。",
+        )
+        st.session_state["load_models"] = load_models
+
+        models: list[str] = st.session_state.get("available_models", [])
+        if api_key and load_models:
+            try:
+                models = xai_list_models(base_url=base_url, api_key=api_key)
+                st.session_state["available_models"] = models
+            except Exception:
+                # 不阻断主流程：仍允许手动填写模型
+                pass
+
+        if models:
+            # 默认选：优先包含 image 的模型，否则回退上次选择/DEFAULT
+            preferred = st.session_state.get("xai_model", DEFAULT_MODEL)
+            default_index = 0
+            if preferred in models:
+                default_index = models.index(preferred)
+            else:
+                for k, mid in enumerate(models):
+                    if "image" in mid.lower() or "imagine" in mid.lower():
+                        default_index = k
+                        break
+
+            model = st.selectbox("选择模型", options=models, index=default_index)
+        else:
+            model = st.text_input("模型（手动输入）", value=st.session_state.get("xai_model", DEFAULT_MODEL))
+
         st.session_state["xai_model"] = model
 
         n = st.slider("一次生成张数 n", min_value=1, max_value=10, value=int(st.session_state.get("xai_n", 1)))
@@ -217,7 +265,11 @@ def main():
                     )
                 except requests.HTTPError as e:
                     # 输出简化错误，避免把敏感信息暴露
-                    st.error(f"请求失败：{e.response.status_code} {e.response.text[:400]}")
+                    status = getattr(e.response, "status_code", "?")
+                    body = (getattr(e.response, "text", "") or "")[:600]
+                    st.error(f"请求失败：{status} {body}")
+                    if status == 404 and "model" in body.lower():
+                        st.info("看起来是模型不可用/无权限。请在侧边栏勾选“自动加载可用模型列表”，然后从下拉框选择你有权限的模型。")
                     st.stop()
                 except Exception as e:
                     st.error(f"请求失败：{e}")
