@@ -368,22 +368,7 @@ def main():
                         st.markdown(f"**{res.filename}**")
                         st.write(res.revised_prompt)
 
-    with col_right:
-        st.subheader("历史记录")
-        df = list_history(limit=history_limit)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "导出历史 CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="generations_history.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        st.caption(
-            "提示：如果在 Streamlit Cloud 上部署，服务端存储可能会在重启后丢失；但图片下载到你本地不会受影响。"
-        )
+    
 
 
 if __name__ == "__main__":
