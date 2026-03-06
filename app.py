@@ -2,6 +2,7 @@ import base64
 import datetime as dt
 import hashlib
 import io
+import json
 import os
 from dataclasses import dataclass
 
@@ -16,6 +17,7 @@ DEFAULT_MODEL = "grok-2-image"  # 若账号无权限，请在界面选择你可�
 DEFAULT_XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai")  # 可选：区域 endpoint
 DB_PATH = os.getenv("DB_PATH", "data/app.duckdb")
 IMAGE_DIR = os.getenv("IMAGE_DIR", "generated_images")
+CONFIG_FILE = os.getenv("CONFIG_FILE", "config/telegram_config.json")  # Telegram 配置本地文件路径
 
 
 @dataclass
@@ -33,6 +35,7 @@ class GenResult:
 def init_storage():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     os.makedirs(IMAGE_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)  # 确保配置目录存在
 
     con = duckdb.connect(DB_PATH)
     con.execute(
@@ -51,6 +54,53 @@ def init_storage():
         """
     )
     con.close()
+
+
+def load_telegram_config() -> dict:
+    """从本地 JSON 文件加载 Telegram 配置"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_telegram_config(bot_token: str, chat_id: str):
+    """保存 Telegram 配置到本地 JSON 文件（不保存到数据库）"""
+    config = {
+        "bot_token": bot_token,
+        "chat_id": chat_id,
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat()
+    }
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def send_image_to_telegram(bot_token: str, chat_id: str, image_bytes: bytes, filename: str, caption: str = "") -> bool:
+    """发送图片到 Telegram"""
+    if not bot_token or not chat_id:
+        return False
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    
+    try:
+        files = {
+            'photo': (filename, io.BytesIO(image_bytes), 'image/jpeg')
+        }
+        data = {
+            'chat_id': chat_id,
+            'caption': caption[:1024] if caption else ""  # Telegram  caption 长度限制
+        }
+        
+        response = requests.post(url, files=files, data=data, timeout=60)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        st.error(f"发送到 Telegram 失败: {str(e)}")
+        return False
 
 
 def xai_list_models(base_url: str, api_key: str) -> list[str]:
@@ -165,6 +215,9 @@ def main():
     st.title(APP_TITLE)
     st.caption("Streamlit + DuckDB + xAI Images API（key 只在界面输入，不落盘）")
 
+    # 加载已保存的 Telegram 配置
+    telegram_config = load_telegram_config()
+
     with st.sidebar:
         st.header("配置")
 
@@ -180,7 +233,7 @@ def main():
         base_url = st.text_input(
             "API Base URL（可选）",
             value=st.session_state.get("xai_base_url", DEFAULT_XAI_BASE_URL),
-            help="默认 https://api.x.ai；如需区域 endpoint，可改成 https://us-east-1.api.x.ai 之类。",
+            help="默认 https://api.x.ai ；如需区域 endpoint，可改成 https://us-east-1.api.x.ai 之类。",
         )
         st.session_state["xai_base_url"] = base_url
 
@@ -189,7 +242,7 @@ def main():
         load_models = st.checkbox(
             "自动加载可用模型列表（推荐）",
             value=st.session_state.get("load_models", True),
-            help="会调用 /v1/models 获取你这个 Key 可用的模型，避免出现“模型不存在/无权限”的 404。",
+            help="会调用 /v1/models 获取你这个 Key 可用的模型，避免出现"模型不存在/无权限"的 404。",
         )
         st.session_state["load_models"] = load_models
 
@@ -232,6 +285,57 @@ def main():
 
         history_limit = st.slider("历史记录展示条数", min_value=10, max_value=200, value=50, step=10)
 
+        # ==================== Telegram 配置区域 ====================
+        st.divider()
+        st.subheader("📱 Telegram 配置")
+        st.caption("配置将保存到本地文件，不存入数据库")
+        
+        # 从本地配置或 session_state 读取默认值
+        default_bot_token = st.session_state.get("telegram_bot_token", telegram_config.get("bot_token", ""))
+        default_chat_id = st.session_state.get("telegram_chat_id", telegram_config.get("chat_id", ""))
+        
+        telegram_bot_token = st.text_input(
+            "Bot Token",
+            type="password",
+            value=default_bot_token,
+            help="从 @BotFather 获取的 Bot Token",
+        )
+        st.session_state["telegram_bot_token"] = telegram_bot_token
+        
+        telegram_chat_id = st.text_input(
+            "Chat ID",
+            value=default_chat_id,
+            help="目标聊天 ID（可以是用户 ID 或频道/群组 ID）",
+        )
+        st.session_state["telegram_chat_id"] = telegram_chat_id
+        
+        # 保存配置按钮
+        if st.button("💾 保存 Telegram 配置", use_container_width=True):
+            if telegram_bot_token and telegram_chat_id:
+                save_telegram_config(telegram_bot_token, telegram_chat_id)
+                st.success("✅ Telegram 配置已保存到本地文件")
+            else:
+                st.warning("请填写 Bot Token 和 Chat ID")
+        
+        # 测试连接按钮
+        if st.button("🧪 测试 Telegram 连接", use_container_width=True):
+            if telegram_bot_token and telegram_chat_id:
+                with st.spinner("发送测试消息..."):
+                    test_message = f"🎨 xAI 图片生成器连接测试\n时间: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    test_url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
+                    try:
+                        response = requests.post(
+                            test_url,
+                            json={"chat_id": telegram_chat_id, "text": test_message},
+                            timeout=30
+                        )
+                        response.raise_for_status()
+                        st.success("✅ 连接成功！请检查 Telegram 是否收到测试消息")
+                    except Exception as e:
+                        st.error(f"❌ 连接失败: {str(e)}")
+            else:
+                st.warning("请先填写 Bot Token 和 Chat ID")
+
     col_left, col_right = st.columns([1.2, 1])
 
     with col_left:
@@ -269,7 +373,7 @@ def main():
                     body = (getattr(e.response, "text", "") or "")[:600]
                     st.error(f"请求失败：{status} {body}")
                     if status == 404 and "model" in body.lower():
-                        st.info("看起来是模型不可用/无权限。请在侧边栏勾选“自动加载可用模型列表”，然后从下拉框选择你有权限的模型。")
+                        st.info("看起来是模型不可用/无权限。请在侧边栏勾选"自动加载可用模型列表"，然后从下拉框选择你有权限的模型。")
                     st.stop()
                 except Exception as e:
                     st.error(f"请求失败：{e}")
@@ -345,6 +449,10 @@ def main():
             st.divider()
             st.subheader("最近一次生成")
 
+            # 获取当前 Telegram 配置
+            current_bot_token = st.session_state.get("telegram_bot_token", "")
+            current_chat_id = st.session_state.get("telegram_chat_id", "")
+
             grid_cols = st.columns(min(3, len(last_results)))
             for j, res in enumerate(last_results):
                 with grid_cols[j % len(grid_cols)]:
@@ -354,21 +462,41 @@ def main():
                     except Exception:
                         st.image(res.image_bytes, caption=res.filename, use_container_width=True)
 
+                    # 下载按钮
                     st.download_button(
-                        label="下载图片",
+                        label="⬇️ 下载图片",
                         data=res.image_bytes,
                         file_name=res.filename,
                         mime=res.image_mime,
                         use_container_width=True,
+                        key=f"download_{j}"
                     )
+
+                    # Telegram 发送按钮（仅在配置完整时显示）
+                    if current_bot_token and current_chat_id:
+                        if st.button(f"📤 发送到 Telegram", use_container_width=True, key=f"tg_send_{j}"):
+                            with st.spinner("发送中..."):
+                                caption = f"🎨 提示词: {res.prompt}\n🤖 模型: {res.model}\n🕐 {res.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
+                                if res.revised_prompt:
+                                    caption += f"\n✨ 优化提示词: {res.revised_prompt}"
+                                
+                                success = send_image_to_telegram(
+                                    bot_token=current_bot_token,
+                                    chat_id=current_chat_id,
+                                    image_bytes=res.image_bytes,
+                                    filename=res.filename,
+                                    caption=caption
+                                )
+                                if success:
+                                    st.success("✅ 发送成功！")
+                    else:
+                        st.info("⚙️ 在侧边栏配置 Telegram 后可发送", icon="ℹ️")
 
             with st.expander("查看 revised_prompt（如果有）"):
                 for res in last_results:
                     if res.revised_prompt:
                         st.markdown(f"**{res.filename}**")
                         st.write(res.revised_prompt)
-
-    
 
 
 if __name__ == "__main__":
