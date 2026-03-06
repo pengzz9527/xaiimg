@@ -373,7 +373,7 @@ def main():
                     body = (getattr(e.response, "text", "") or "")[:600]
                     st.error(f"请求失败：{status} {body}")
                     if status == 404 and "model" in body.lower():
-                        st.info("看起来是模型不可用/无权限。请在侧边栏勾选"自动加载可用模型列表"，然后从下拉框选择你有权限的模型。")
+                        st.info('看起来是模型不可用/无权限。请在侧边栏勾选"自动加载可用模型列表"，然后从下拉框选择你有权限的模型。')
                     st.stop()
                 except Exception as e:
                     st.error(f"请求失败：{e}")
