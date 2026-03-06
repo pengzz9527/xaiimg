@@ -242,7 +242,7 @@ def main():
         load_models = st.checkbox(
             "自动加载可用模型列表（推荐）",
             value=st.session_state.get("load_models", True),
-            help="会调用 /v1/models 获取你这个 Key 可用的模型，避免出现"模型不存在/无权限"的 404。",
+            help='会调用 /v1/models 获取你这个 Key 可用的模型，避免出现"模型不存在/无权限"的 404。',
         )
         st.session_state["load_models"] = load_models
 
